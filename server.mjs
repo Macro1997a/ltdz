@@ -1,3 +1,4 @@
+import { createAdmin } from './admin.mjs';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -55,24 +56,29 @@ if (!db.prepare("SELECT key FROM meta WHERE key='collaboration-v3'").get()) {
   if(row){const m=JSON.parse(row.body);if(m.name==='张宏浩')put('member',{...m,coordinator:true});}
   db.prepare("INSERT INTO meta VALUES ('collaboration-v3','1')").run();
 }
-function get(id,kind) { const row=db.prepare('SELECT body FROM items WHERE id=? AND kind=?').get(id,kind); return row?JSON.parse(row.body):null; }
+function get(id,kind) { if(typeof id!=='string')return null;const row=db.prepare('SELECT body FROM items WHERE id=? AND kind=?').get(id,kind); return row?JSON.parse(row.body):null; }
 function all(kind) { return db.prepare('SELECT body FROM items WHERE kind=? ORDER BY rowid').all(kind).map(r=>JSON.parse(r.body)); }
 function activeMember(id) { const m=get(id,'member');return !!m && m.active!==false; }
-function state() { const result={members:[],roles:[],projects:[],tasks:[],logs:[],stages,workflowModes,collaborationPolicy:{taskCreation:'all-members',taskAssignment:'all-members',projectVisibility:'all-members'},demo:true}; for(const r of db.prepare('SELECT kind, body FROM items ORDER BY rowid').all()) result[({member:'members',role:'roles',project:'projects',task:'tasks',log:'logs'})[r.kind]].push(JSON.parse(r.body)); for(const m of result.members)m.role=m.roleIds?.map(id=>result.roles.find(r=>r.id===id)?.name).filter(Boolean).join(' / ')||m.role||'未分配工种'; return result; }
+const admin=createAdmin({db,all,get,put,error,str,body,defaultStages:stages});
+const broadcast=()=>{for(const c of clients)c.write('data: changed\n\n');};
+function state() { const result={members:[],roles:[],projects:[],tasks:[],logs:[],stages:admin.stageNames(),...admin.snapshot(),workflowModes,collaborationPolicy:{taskCreation:'all-members',taskAssignment:'all-members',projectVisibility:'all-members'},demo:true}; for(const r of db.prepare('SELECT kind, body FROM items ORDER BY rowid').all()){const key=({member:'members',role:'roles',project:'projects',task:'tasks',log:'logs'})[r.kind];if(key)result[key].push(JSON.parse(r.body));}for(const p of result.projects)p.category=get(p.categoryId,'category')?.name||p.category; for(const m of result.members)m.role=m.roleIds?.map(id=>result.roles.find(r=>r.id===id)?.name).filter(Boolean).join(' / ')||m.role||'未分配工种'; return result; }
 function error(message) { throw Object.assign(new Error(message),{status:400}); }
 function str(v,name,max=200) { if(typeof v!=='string'||!v.trim()||v.length>max) error(`${name}不能为空，且不能超过${max}字`); return v.trim(); }
-function exists(id,kind) { return !!db.prepare('SELECT id FROM items WHERE id=? AND kind=?').get(id,kind); }
+function exists(id,kind) { return !!get(id,kind); }
 function validDate(d) { return typeof d==='string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0,10)===d; }
 function validate(kind,b) {
   if(!b||typeof b!=='object'||Array.isArray(b))error('请求内容必须为对象');
   if(kind==='role') { const name=str(b.name,'工种名称',30);if(all('role').some(r=>r.name===name&&r.id!==b.id))error('该工种已存在');return {name,active:b.active!==false}; }
-  if(kind==='member') { const name=str(b.name,'成员姓名',40);const roleIds=b.roleIds;if(!Array.isArray(roleIds)||!roleIds.length||roleIds.length>30||roleIds.some(id=>!get(id,'role')?.active))error('请至少选择一个在用工种');const weeklyCapacity=Number(b.weeklyCapacity);if(!Number.isFinite(weeklyCapacity)||weeklyCapacity<=0||weeklyCapacity>168)error('周参考工时需大于0且不超过168');return {name,roleIds:[...new Set(roleIds)],weeklyCapacity,coordinator:b.coordinator===true,active:b.active!==false,color:/^#[\da-f]{6}$/i.test(b.color)?b.color:'#dce7d8'}; }
-  if(kind==='project') { const name=str(b.name,'项目名称',80); if(!stages.includes(b.stage)||!activeMember(b.owner)||!validDate(b.due)) error('请选择有效的阶段、负责人和日期'); return {name,stage:b.stage,owner:b.owner,due:b.due,collection:str(b.collection,'系列',40),category:str(b.category,'品类',30),description:typeof b.description==='string'?b.description.slice(0,1000):'',tone:['silver','gold','leaf','stone'].includes(b.tone)?b.tone:'silver',code:'PR-'+randomUUID().slice(0,4).toUpperCase(),target:0,workflowMode:workflowModes.includes(b.workflowMode)?b.workflowMode:'混合推进'}; }
-  if(kind==='task') { if(!exists(b.projectId,'project')||!activeMember(b.assignee)||!stages.includes(b.stage)||!validDate(b.due)) error('项目、在用成员、阶段或日期无效'); const estimate=Number(b.estimate); if(!Number.isFinite(estimate)||estimate<=0||estimate>1000) error('预计工时需大于0且不超过1000');const dependencies=b.dependencies??[];if(!Array.isArray(dependencies)||dependencies.length>100||dependencies.some(id=>get(id,'task')?.projectId!==b.projectId))error('前置任务必须属于同一项目');const requiresApproval=b.requiresApproval===true;if(requiresApproval&&!activeMember(b.reviewer))error('请选择在用成员作为交接确认人');return {title:str(b.title,'任务名称',120),projectId:b.projectId,assignee:b.assignee,stage:b.stage,due:b.due,estimate,status:'待开始',dependencies:[...new Set(dependencies)],requiresApproval,reviewer:requiresApproval?b.reviewer:null}; }
+  if(kind==='member') { const name=str(b.name,'成员姓名',40);const roleIds=b.roleIds;if(!Array.isArray(roleIds)||!roleIds.length||roleIds.length>30||roleIds.some(id=>!get(id,'role')?.active))error('请至少选择一个在用工种');const weeklyCapacity=Number(b.weeklyCapacity);if(!Number.isFinite(weeklyCapacity)||weeklyCapacity<=0||weeklyCapacity>168)error('周参考工时需大于0且不超过168');return {name,roleIds:[...new Set(roleIds)],weeklyCapacity,coordinator:b.coordinator===true,nickname:typeof b.nickname==='string'?b.nickname.trim().slice(0,40):'',bio:typeof b.bio==='string'?b.bio.trim().slice(0,500):'',active:b.active!==false,color:/^#[\da-f]{6}$/i.test(b.color)?b.color:'#dce7d8'}; }
+  if(kind==='project') { const name=str(b.name,'项目名称',80); if((!admin.stageNames().includes(b.stage)&&get(b.id,'project')?.stage!==b.stage)||!activeMember(b.owner)||!validDate(b.due)) error('请选择有效的阶段、负责人和日期'); return {name,stage:b.stage,owner:b.owner,due:b.due,collection:str(b.collection,'系列',40),...admin.projectFields(b),description:typeof b.description==='string'?b.description.slice(0,1000):'',tone:['silver','gold','leaf','stone'].includes(b.tone)?b.tone:'silver',code:'PR-'+randomUUID().slice(0,4).toUpperCase(),target:0,workflowMode:workflowModes.includes(b.workflowMode)?b.workflowMode:'混合推进'}; }
+  if(kind==='task') { if(!exists(b.projectId,'project')||!activeMember(b.assignee)||!admin.stageNames().includes(b.stage)||!validDate(b.due)) error('项目、在用成员、阶段或日期无效'); const estimate=Number(b.estimate); if(!Number.isFinite(estimate)||estimate<=0||estimate>1000) error('预计工时需大于0且不超过1000');const dependencies=b.dependencies??[];if(!Array.isArray(dependencies)||dependencies.length>100||dependencies.some(id=>get(id,'task')?.projectId!==b.projectId))error('前置任务必须属于同一项目');const requiresApproval=b.requiresApproval===true;if(requiresApproval&&!activeMember(b.reviewer))error('请选择在用成员作为交接确认人');return {title:str(b.title,'任务名称',120),projectId:b.projectId,assignee:b.assignee,stage:b.stage,due:b.due,estimate,status:'待开始',dependencies:[...new Set(dependencies)],requiresApproval,reviewer:requiresApproval?b.reviewer:null}; }
   if(kind==='log') { if(!exists(b.taskId,'task')||!activeMember(b.memberId)||!validDate(b.date)) error('任务、成员或日期无效'); const hours=Number(b.hours),quantity=Number(b.quantity); if(!Number.isFinite(hours)||hours<=0||hours>24||!Number.isInteger(quantity)||quantity<0||quantity>100000) error('工时需在0到24之间，数量需为非负整数'); const link=typeof b.link==='string'?b.link.trim():''; if(link && (!/^https?:\/\//i.test(link)||link.length>2000)) error('成果链接应为 http 或 https 地址'); return {taskId:b.taskId,memberId:b.memberId,hours,quantity,note:str(b.note,'工作说明',1000),link,date:b.date,createdAt:new Date().toISOString()}; }
   error('不支持的类型');
 }
 function updateTask(item,b) {
+  if(b.title!==undefined)item.title=str(b.title,'任务名称',120);
+  if(b.estimate!==undefined){const n=Number(b.estimate);if(!Number.isFinite(n)||n<=0||n>1000)error('预计工时需大于0且不超过1000');item.estimate=n;}
+  if(b.stage!==undefined){if(!admin.stageNames().includes(b.stage)&&b.stage!==item.stage)error('流程阶段无效');item.stage=b.stage;}
   if(b.assignee!==undefined){if(!activeMember(b.assignee))error('请选择在用成员');item.assignee=b.assignee;}
   if(b.due!==undefined){if(!validDate(b.due))error('无效截止日期');item.due=b.due;}
   if(b.reviewer!==undefined){if(!item.requiresApproval||!activeMember(b.reviewer)||item.status==='已完成')error('无法调整此交接确认人');item.reviewer=b.reviewer;}
@@ -84,14 +90,15 @@ function updateTask(item,b) {
   if(!item.requiresApproval&&b.status==='待确认')error('此任务不需要交接确认');
   return {...item,status:b.status,...(b.status!=='已完成'?{confirmedBy:null,confirmedAt:null}:{})};
 }
-async function body(req) { let s=''; for await(const chunk of req) { s+=chunk; if(s.length>20000) error('请求内容过大'); } try { return JSON.parse(s); } catch { error('无效的JSON'); } }
+async function body(req,limit=20000) { let s=''; for await(const chunk of req) { s+=chunk; if(Buffer.byteLength(s)>limit) error('请求内容过大'); } try { return JSON.parse(s); } catch { error('无效的JSON'); } }
 const server = http.createServer(async(req,res)=>{
   const path=new URL(req.url,'http://localhost').pathname;
   const json=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
   try {
+    if(await admin.handle(req,res,path,json,broadcast))return;
     if(req.method==='GET' && path==='/api/state') return json(200,state());
     if(req.method==='GET' && path==='/api/events') { res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('event: connected\ndata: {}\n\n'); clients.add(res);req.on('close',()=>clients.delete(res));return; }
-    if(req.method==='POST' && ['/api/projects','/api/tasks','/api/logs','/api/members','/api/roles'].includes(path)) { const kind={'/api/projects':'project','/api/tasks':'task','/api/logs':'log','/api/members':'member','/api/roles':'role'}[path]; const item={...validate(kind,await body(req)),id:randomUUID()};put(kind,item); for(const c of clients)c.write('data: changed\n\n');return json(201,item); }
+    if(req.method==='POST' && ['/api/projects','/api/tasks','/api/logs','/api/members','/api/roles'].includes(path)) { const kind={'/api/projects':'project','/api/tasks':'task','/api/logs':'log','/api/members':'member','/api/roles':'role'}[path]; const item={...validate(kind,{...await body(req),id:undefined}),id:randomUUID()};put(kind,item); for(const c of clients)c.write('data: changed\n\n');return json(201,item); }
     if(req.method==='POST' && /^\/api\/tasks\/[\w-]+\/confirm$/.test(path)) {
       const id=path.split('/')[3],item=get(id,'task'),b=await body(req);
       if(!item)return json(404,{error:'任务不存在'});
@@ -107,7 +114,8 @@ const server = http.createServer(async(req,res)=>{
       if(!b||typeof b!=='object'||Array.isArray(b))error('请求内容必须为对象');
       if(kind==='task')item=updateTask(item,b);
       if(kind==='project'){
-        if(b.stage!==undefined){if(!stages.includes(b.stage))error('无效阶段');item.stage=b.stage;}
+        if(b.name!==undefined){const updated=validate('project',{...item,...b,id});item={...item,...updated,code:item.code};}
+        if(b.stage!==undefined){if(!admin.stageNames().includes(b.stage))error('无效阶段');item.stage=b.stage;}
         if(b.workflowMode!==undefined){if(!workflowModes.includes(b.workflowMode))error('无效协作方式');item.workflowMode=b.workflowMode;}
       }
       if(kind==='member'){
@@ -120,9 +128,16 @@ const server = http.createServer(async(req,res)=>{
       }
       put(kind,item);for(const c of clients)c.write('data: changed\n\n');return json(200,item);
     }
+    if(req.method==='DELETE'&&/^\/api\/(tasks|projects)\/[\w-]+$/.test(path)){
+      const [, ,plural,id]=path.split('/'),kind=plural==='tasks'?'task':'project',item=get(id,kind);
+      if(!item)return json(404,{error:'记录不存在'});
+      if(kind==='task'&&(item.status!=='待开始'||all('log').some(l=>l.taskId===id)||all('task').some(t=>t.dependencies?.includes(id))))error('该任务已有进展、工作记录或下游引用，请保留历史，不能直接删除');
+      if(kind==='project'&&all('task').some(t=>t.projectId===id))error('项目下仍有任务，请先处理任务再删除项目');
+      db.prepare('DELETE FROM items WHERE id=? AND kind=?').run(id,kind);broadcast();return json(200,{ok:true});
+    }
     if(path.startsWith('/api/'))return json(404,{error:'接口不存在'});
     if(req.method!=='GET')return json(405,{error:'方法不支持'});
-    const files={'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],'/workspace-model.js':['workspace-model.js','text/javascript']};
+    const files={'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],'/workspace-model.js':['workspace-model.js','text/javascript'],'/admin-ui.js':['admin-ui.js','text/javascript']};
     if(!files[path])return json(404,{error:'页面不存在'});
     const [file,mime]=files[path];res.writeHead(200,{'Content-Type':mime+'; charset=utf-8','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"});res.end(readFileSync(join(root,'public',file)));
   } catch(e) { json(e.status||500,{error:e.status?e.message:'服务器错误'}); if(!e.status)console.error(e); }
