@@ -1,3 +1,4 @@
+import { ancestorPath, validateTreeMove } from './public/domain.js';
 import { randomUUID } from 'node:crypto';
 
 export function createAdmin({db,all,get,put,error,str,body,defaultStages}) {
@@ -20,12 +21,12 @@ export function createAdmin({db,all,get,put,error,str,body,defaultStages}) {
     const existing=b.id?get(b.id,'project'):null;
     const c=b.categoryId?get(b.categoryId,'category'):all('category').find(c=>c.name===b.category);
     if(!c||(!c.active&&existing?.categoryId!==c.id))error('请选择在用分类，或先到后台设置新增分类');
-    if(c.parentId&&!get(c.parentId,'category')?.active&&existing?.categoryId!==c.id)error('该分类的上级已停用');
+    if(ancestorPath(all('category'),c.id).some(x=>!x.active)&&existing?.categoryId!==c.id)error('该分类的上级已停用');
     const custom=b.customFields??{};if(typeof custom!=='object'||custom===null||Array.isArray(custom))error('项目字段格式错误');
     const values=Object.create(null);const definitions=all('projectField');
     for(const key of Object.keys(custom))if(!definitions.some(f=>f.id===key))error('项目字段已被删除，请刷新后重试');
     for(const f of definitions){
-      const applicable=f.active&&(!f.categoryId||[c.id,c.parentId].includes(f.categoryId));
+      const applicable=f.active&&(!f.categoryId||ancestorPath(all('category'),c.id).some(x=>x.id===f.categoryId));
       let value=custom[f.id];
       if(!applicable){if(existing?.customFields?.[f.id]!==undefined)values[f.id]=existing.customFields[f.id];continue;}
       if(value===undefined||value===null||value===''){if(f.required)error('请填写：'+f.name);continue;}
@@ -42,9 +43,8 @@ export function createAdmin({db,all,get,put,error,str,body,defaultStages}) {
     const value={name,active:b.active!==false,order};
     if(kind==='category'){
       const parentId=b.parentId||null,parent=parentId?get(parentId,'category'):null;
-      if(parentId&&(!parent||parentId===id||parent.parentId))error('仅支持一级分类和二级子分类，不能循环引用');
-      if(parentId&&value.active&&!parent.active)error('请先启用上级分类');
-      if(parentId&&all('category').some(c=>c.parentId===id))error('包含子分类的分类不能改为二级分类');
+      try{validateTreeMove(all('category'),id||'new-category',parentId,5);}catch(e){error(e.message);}
+      if(value.active&&parentId&&ancestorPath(all('category'),parentId).some(x=>!x.active))error('请先启用所有上级分类');
       if(!value.active&&all('category').some(c=>c.parentId===id&&c.active))error('请先停用该分类下的子分类');
       return {...value,parentId};
     }

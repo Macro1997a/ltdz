@@ -1,8 +1,8 @@
-# 用手机测试铸序
+# 用手机测试显真文创工作室
 
 当前适合在可信的家庭或办公室 Wi-Fi 中使用示例数据测试。无需安装手机 APP。
 
-1. 在电脑安装 Node.js 24 或更新的 LTS 版本：<https://nodejs.org/>。
+1. 在电脑安装 Node.js 24.5 或更新的 LTS 版本：<https://nodejs.org/>。
 2. 解压整个测试包，不能直接在压缩包内启动文件。
 3. Windows 双击 `start-phone.cmd`；macOS / Linux 在该文件夹打开终端，执行 `sh start-phone.sh`。
 4. 将手机和电脑连接同一个 Wi-Fi。手机暂时不要使用蜂窝数据或隔离的访客 Wi-Fi。
